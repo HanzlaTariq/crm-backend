@@ -12,6 +12,7 @@ const customerSchema = new mongoose.Schema({
   },
   addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  assignedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   notes: { type: String }
 }, { timestamps: true });
 

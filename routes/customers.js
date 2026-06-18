@@ -74,6 +74,7 @@ router.get('/', auth, async (req, res) => {
     const customers = await Customer.find(query)
       .populate('addedBy', 'name role')
       .populate('assignedTo', 'name role')
+      .populate('assignedBy', 'name role')
       .sort({ createdAt: -1 });
 
     res.json(customers);
@@ -87,7 +88,8 @@ router.get('/:id', auth, async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id)
       .populate('addedBy', 'name role')
-      .populate('assignedTo', 'name role');
+      .populate('assignedTo', 'name role')
+      .populate('assignedBy', 'name role');
     if (!customer) return res.status(404).json({ message: 'Customer not found' });
     res.json(customer);
   } catch (err) {
@@ -103,6 +105,7 @@ router.post('/', auth, async (req, res) => {
       name, phone, email, address, notes,
       addedBy: req.user.id,
       assignedTo: assignedTo || req.user.id,
+      assignedBy: req.user.id,
     });
     res.status(201).json(customer);
   } catch (err) {
@@ -176,9 +179,11 @@ router.put('/:id/assign', auth, async (req, res) => {
 
     const customer = await Customer.findByIdAndUpdate(
       req.params.id,
-      { assignedTo },
+      { assignedTo, assignedBy: req.user.id },
       { new: true }
-    ).populate('assignedTo', 'name role')
+    )
+      .populate('assignedTo', 'name role')
+      .populate('assignedBy', 'name role')
 
     res.json(customer)
   } catch (err) {
