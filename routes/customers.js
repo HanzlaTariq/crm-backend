@@ -27,12 +27,14 @@ const getTeamIds = async (userId, role) => {
   return [userId]
 }
 
-// Stats
 router.get('/stats/summary', auth, async (req, res) => {
   try {
     const { role, id } = req.user
     const teamIds = await getTeamIds(id, role)
-    const matchQuery = teamIds ? { addedBy: { $in: teamIds } } : {}
+
+    const matchQuery = teamIds
+      ? { $or: [{ addedBy: { $in: teamIds } }, { assignedTo: { $in: teamIds } }] }
+      : {}
 
     const [total, interested, followup, sale, lost, notInterested] = await Promise.all([
       Customer.countDocuments(matchQuery),
@@ -54,7 +56,20 @@ router.get('/', auth, async (req, res) => {
   try {
     const { role, id } = req.user
     const teamIds = await getTeamIds(id, role)
-    const query = teamIds ? { addedBy: { $in: teamIds } } : {}
+
+    let query;
+    if (!teamIds) {
+      // Admin — sab dekhe
+      query = {}
+    } else {
+      // addedBy YA assignedTo dono check karo
+      query = {
+        $or: [
+          { addedBy: { $in: teamIds } },
+          { assignedTo: { $in: teamIds } }
+        ]
+      }
+    }
 
     const customers = await Customer.find(query)
       .populate('addedBy', 'name role')
@@ -120,5 +135,55 @@ router.delete('/:id', auth, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
+
+
+// Assign customer to someone
+router.put('/:id/assign', auth, async (req, res) => {
+  try {
+    const { assignedTo } = req.body
+    const { role, id } = req.user
+
+    // Telecom aur salesperson assign nahi kar sakte
+    if (['telecom', 'salesperson'].includes(role)) {
+      return res.status(403).json({ message: 'Not authorized to assign customers' })
+    }
+
+    // Jis ko assign kar rahe hain uska role check karo
+    const assignee = await User.findById(assignedTo)
+    if (!assignee) return res.status(404).json({ message: 'User not found' })
+
+    // Admin ko assign nahi kar sakte
+    if (assignee.role === 'admin') {
+      return res.status(400).json({ message: 'Cannot assign to admin' })
+    }
+
+    // Manager — sirf apni hierarchy mein assign kare
+    if (role === 'manager') {
+      const teamIds = await getTeamIds(id, role)
+      if (!teamIds.map(String).includes(String(assignedTo))) {
+        return res.status(403).json({ message: 'Can only assign to your team members' })
+      }
+    }
+
+    // J.Manager — sirf apne neeche wale ko
+    if (role === 'jmanager') {
+      const teamIds = await getTeamIds(id, role)
+      if (!teamIds.map(String).includes(String(assignedTo))) {
+        return res.status(403).json({ message: 'Can only assign to your team members' })
+      }
+    }
+
+    const customer = await Customer.findByIdAndUpdate(
+      req.params.id,
+      { assignedTo },
+      { new: true }
+    ).populate('assignedTo', 'name role')
+
+    res.json(customer)
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
 
 export default router;
