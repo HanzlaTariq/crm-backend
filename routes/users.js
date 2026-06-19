@@ -17,33 +17,12 @@ router.get('/', auth, async (req, res) => {
         .select('-password')
         .populate('manager', 'name role')
         .sort({ createdAt: -1 });
-
-    } else if (role === 'manager') {
-      // Manager — apne directly neeche wale (jmanager) + unke neeche wale
-      const jmanagers = await User.find({ manager: id }).select('_id')
-      const jmanagerIds = jmanagers.map(j => j._id)
-
-      const bottomLevel = await User.find({ 
-        manager: { $in: jmanagerIds } 
-      }).select('_id')
-      const bottomIds = bottomLevel.map(b => b._id)
-
-      users = await User.find({
-        _id: { $in: [...jmanagerIds, ...bottomIds] }
-      })
-        .select('-password')
-        .populate('manager', 'name role')
-        .sort({ createdAt: -1 });
-
-    } else if (role === 'jmanager') {
-      // J.Manager — sirf apne directly neeche wale
-      users = await User.find({ manager: id })
-        .select('-password')
-        .populate('manager', 'name role')
-        .sort({ createdAt: -1 });
-
     } else {
-      users = [];
+      // All non-admin roles (manager, jmanager, telecom, salesperson) see all users except admin
+      users = await User.find({ role: { $ne: 'admin' } })
+        .select('-password')
+        .populate('manager', 'name role')
+        .sort({ createdAt: -1 });
     }
 
     res.json(users);

@@ -100,6 +100,10 @@ router.get('/:id', auth, async (req, res) => {
 // Add customer
 router.post('/', auth, async (req, res) => {
   try {
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ message: 'Admin cannot add customers' });
+    }
+
     const { name, phone, email, address, notes, assignedTo } = req.body;
     const customer = await Customer.create({
       name, phone, email, address, notes,
@@ -147,11 +151,6 @@ router.put('/:id/assign', auth, async (req, res) => {
     const { assignedTo } = req.body
     const { role, id } = req.user
 
-    // Telecom aur salesperson assign nahi kar sakte
-    if (['telecom', 'salesperson'].includes(role)) {
-      return res.status(403).json({ message: 'Not authorized to assign customers' })
-    }
-
     // Jis ko assign kar rahe hain uska role check karo
     const assignee = await User.findById(assignedTo)
     if (!assignee) return res.status(404).json({ message: 'User not found' })
@@ -161,20 +160,26 @@ router.put('/:id/assign', auth, async (req, res) => {
       return res.status(400).json({ message: 'Cannot assign to admin' })
     }
 
-    // Manager — sirf apni hierarchy mein assign kare
+    // Flat hierarchy — no team structure except admin
+    // Rules:
+    // - admin: can assign to anyone (except admin which is already blocked)
+    // - manager: can assign to jmanager, telecom, salesperson, other managers
+    // - jmanager: can assign to telecom, salesperson, other jmanagers
+    // - telecom/salesperson: can assign to peers OR to manager/jmanager
     if (role === 'manager') {
-      const teamIds = await getTeamIds(id, role)
-      if (!teamIds.map(String).includes(String(assignedTo))) {
-        return res.status(403).json({ message: 'Can only assign to your team members' })
+      if (!['manager', 'jmanager', 'telecom', 'salesperson'].includes(assignee.role)) {
+        return res.status(403).json({ message: 'Not authorized to assign customers' })
       }
-    }
-
-    // J.Manager — sirf apne neeche wale ko
-    if (role === 'jmanager') {
-      const teamIds = await getTeamIds(id, role)
-      if (!teamIds.map(String).includes(String(assignedTo))) {
-        return res.status(403).json({ message: 'Can only assign to your team members' })
+    } else if (role === 'jmanager') {
+      if (!['jmanager', 'telecom', 'salesperson'].includes(assignee.role)) {
+        return res.status(403).json({ message: 'Not authorized to assign customers' })
       }
+    } else if (['telecom', 'salesperson'].includes(role)) {
+      if (!['telecom', 'salesperson', 'manager', 'jmanager'].includes(assignee.role)) {
+        return res.status(403).json({ message: 'Can only assign to peers or managers' })
+      }
+    } else if (role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to assign customers' })
     }
 
     const customer = await Customer.findByIdAndUpdate(
