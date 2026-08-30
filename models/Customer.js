@@ -13,7 +13,11 @@ const customerSchema = new mongoose.Schema({
   addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   assignedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  notes: { type: String }
+  notes: { type: String },
+  closed: { type: Boolean, default: false },
+  closedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  closedAt: { type: Date, default: null },
+  closeNote: { type: String, default: '' },
 }, { timestamps: true });
 
 export default mongoose.model('Customer', customerSchema);

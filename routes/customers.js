@@ -7,6 +7,18 @@ import auth from '../middleware/auth.js';
 
 const router = express.Router();
 
+// Non-admin/non-closer ko sirf "close done" flag dikhna chahiye —
+// closedBy, closedAt, closeNote sirf admin ko milta hai.
+const sanitizeClosedFields = (customer, viewerRole) => {
+  const obj = customer.toObject ? customer.toObject() : customer
+  if (viewerRole !== 'admin') {
+    delete obj.closedBy
+    delete obj.closedAt
+    delete obj.closeNote
+  }
+  return obj
+}
+
 // Helper — get all user IDs under a manager/jmanager
 const getTeamIds = async (userId, role) => {
   if (role === 'admin') return null; // null = sab
@@ -54,46 +66,65 @@ router.get('/stats/summary', auth, async (req, res) => {
 })
 
 // Get all customers — role based
+// Assign hone ke baad sirf jis ko assign hua ho wahi dekhega — jisne assign kiya (assignedBy)
+// ya team hierarchy me koi aur, unhe dubara list me nazar nahi aayega. Admin sab dekhta hai.
 router.get('/', auth, async (req, res) => {
   try {
     const { role, id } = req.user
-    const teamIds = await getTeamIds(id, role)
 
-    let query;
-    if (!teamIds) {
-      // Admin — sab dekhe
-      query = {}
-    } else {
-      // addedBy YA assignedTo dono check karo
-      query = {
-        $or: [
-          { addedBy: { $in: teamIds } },
-          { assignedTo: { $in: teamIds } }
-        ]
-      }
-    }
+    const query = role === 'admin'
+      ? { closed: { $ne: true } } // admin ke normal view me sirf open customers — $ne: true taake purane (bina closed field wale) docs bhi count ho
+      : { assignedTo: id }
 
     const customers = await Customer.find(query)
       .populate('addedBy', 'name role')
       .populate('assignedTo', 'name role')
       .populate('assignedBy', 'name role')
+      .populate('closedBy', 'name role')
       .sort({ createdAt: -1 });
 
-    res.json(customers);
+    res.json(customers.map(c => sanitizeClosedFields(c, role)));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// Get single customer
+// Admin-only — saare close ki hui customers ki poori detail (kis ne close ki, kab, note)
+router.get('/closed/all', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized' })
+    }
+
+    const customers = await Customer.find({ closed: true })
+      .populate('addedBy', 'name role')
+      .populate('assignedTo', 'name role')
+      .populate('assignedBy', 'name role')
+      .populate('closedBy', 'name role')
+      .sort({ closedAt: -1 })
+
+    res.json(customers)
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// Get single customer — sirf assignedTo ya admin dekh sakte hain
 router.get('/:id', auth, async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id)
       .populate('addedBy', 'name role')
       .populate('assignedTo', 'name role')
-      .populate('assignedBy', 'name role');
+      .populate('assignedBy', 'name role')
+      .populate('closedBy', 'name role');
     if (!customer) return res.status(404).json({ message: 'Customer not found' });
-    res.json(customer);
+
+    const { role, id } = req.user
+    if (role !== 'admin' && String(customer.assignedTo?._id) !== String(id)) {
+      return res.status(403).json({ message: 'Not authorized to view this customer' });
+    }
+
+    res.json(sanitizeClosedFields(customer, role));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -130,14 +161,64 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
-// Update customer
+// Update customer — sirf assignedTo ya admin edit kar sakte hain
 router.put('/:id', auth, async (req, res) => {
   try {
+    const existing = await Customer.findById(req.params.id)
+    if (!existing) return res.status(404).json({ message: 'Customer not found' });
+
+    const { role, id } = req.user
+    if (role !== 'admin' && String(existing.assignedTo) !== String(id)) {
+      return res.status(403).json({ message: 'Not authorized to edit this customer' });
+    }
+    if (existing.closed) {
+      return res.status(400).json({ message: 'Closed customer cannot be edited' });
+    }
+
+    // closed-related fields is route se change nahi honi chahiye — sirf /close endpoint se
+    const { closed, closedBy, closedAt, closeNote, ...safeBody } = req.body
+
     const customer = await Customer.findByIdAndUpdate(
-      req.params.id, req.body, { new: true }
-    );
-    if (!customer) return res.status(404).json({ message: 'Customer not found' });
+      req.params.id, safeBody, { new: true }
+    )
+      .populate('addedBy', 'name role')
+      .populate('assignedTo', 'name role')
+      .populate('assignedBy', 'name role');
     res.json(customer);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Close customer — sirf jis ko assign hua ho, ya admin
+router.put('/:id/close', auth, async (req, res) => {
+  try {
+    const { role, id } = req.user
+    const { note } = req.body
+
+    const customer = await Customer.findById(req.params.id)
+    if (!customer) return res.status(404).json({ message: 'Customer not found' });
+
+    if (role !== 'admin' && String(customer.assignedTo) !== String(id)) {
+      return res.status(403).json({ message: 'Not authorized to close this customer' });
+    }
+    if (customer.closed) {
+      return res.status(400).json({ message: 'Customer already closed' });
+    }
+
+    customer.closed = true
+    customer.closedBy = id
+    customer.closedAt = new Date()
+    customer.closeNote = note || ''
+    await customer.save()
+
+    const populated = await Customer.findById(customer._id)
+      .populate('addedBy', 'name role')
+      .populate('assignedTo', 'name role')
+      .populate('assignedBy', 'name role')
+      .populate('closedBy', 'name role')
+
+    res.json(sanitizeClosedFields(populated, role));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
