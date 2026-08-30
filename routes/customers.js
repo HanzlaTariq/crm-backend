@@ -1,6 +1,8 @@
 import express from 'express';
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
+import AssignmentHistory from '../models/AssignmentHistory.js';
+import FollowUp from '../models/FollowUp.js';
 import auth from '../middleware/auth.js';
 
 const router = express.Router();
@@ -105,12 +107,23 @@ router.post('/', auth, async (req, res) => {
     }
 
     const { name, phone, email, address, notes, assignedTo } = req.body;
+    const finalAssignee = assignedTo || req.user.id;
     const customer = await Customer.create({
       name, phone, email, address, notes,
       addedBy: req.user.id,
-      assignedTo: assignedTo || req.user.id,
+      assignedTo: finalAssignee,
       assignedBy: req.user.id,
     });
+
+    // Timeline ki pehli entry — customer create hote hi assignment record ho
+    await AssignmentHistory.create({
+      customer: customer._id,
+      fromUser: null,
+      toUser: finalAssignee,
+      assignedBy: req.user.id,
+      note: 'Customer added',
+    });
+
     res.status(201).json(customer);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -148,8 +161,11 @@ router.delete('/:id', auth, async (req, res) => {
 // Assign customer to someone
 router.put('/:id/assign', auth, async (req, res) => {
   try {
-    const { assignedTo } = req.body
+    const { assignedTo, note } = req.body
     const { role, id } = req.user
+
+    const existingCustomer = await Customer.findById(req.params.id)
+    if (!existingCustomer) return res.status(404).json({ message: 'Customer not found' })
 
     // Jis ko assign kar rahe hain uska role check karo
     const assignee = await User.findById(assignedTo)
@@ -182,6 +198,15 @@ router.put('/:id/assign', auth, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to assign customers' })
     }
 
+    // Purani assignment ko permanently save karo — kabhi overwrite/lost nahi hogi
+    await AssignmentHistory.create({
+      customer: req.params.id,
+      fromUser: existingCustomer.assignedTo || null,
+      toUser: assignedTo,
+      assignedBy: id,
+      note: note || '',
+    })
+
     const customer = await Customer.findByIdAndUpdate(
       req.params.id,
       { assignedTo, assignedBy: req.user.id },
@@ -191,6 +216,50 @@ router.put('/:id/assign', auth, async (req, res) => {
       .populate('assignedBy', 'name role')
 
     res.json(customer)
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// Full timeline — assignment history + follow-ups, ek jagah, time order me
+// Isi se pata chalta hai: kis ko pehle assign tha, kab, aur us waqt kya response tha
+router.get('/:id/timeline', auth, async (req, res) => {
+  try {
+    const customerId = req.params.id
+
+    const [assignments, followups] = await Promise.all([
+      AssignmentHistory.find({ customer: customerId })
+        .populate('fromUser', 'name role')
+        .populate('toUser', 'name role')
+        .populate('assignedBy', 'name role')
+        .sort({ createdAt: 1 }),
+      FollowUp.find({ customer: customerId })
+        .populate('doneBy', 'name role')
+        .sort({ createdAt: 1 }),
+    ])
+
+    const timeline = [
+      ...assignments.map(a => ({
+        type: 'assignment',
+        _id: a._id,
+        createdAt: a.createdAt,
+        fromUser: a.fromUser,
+        toUser: a.toUser,
+        assignedBy: a.assignedBy,
+        note: a.note,
+      })),
+      ...followups.map(f => ({
+        type: 'followup',
+        _id: f._id,
+        createdAt: f.createdAt,
+        status: f.status,
+        note: f.note,
+        nextCallDate: f.nextCallDate,
+        doneBy: f.doneBy,
+      })),
+    ].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+
+    res.json(timeline)
   } catch (err) {
     res.status(500).json({ message: err.message })
   }
