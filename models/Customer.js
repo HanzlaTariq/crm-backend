@@ -20,4 +20,13 @@ const customerSchema = new mongoose.Schema({
   closeNote: { type: String, default: '' },
 }, { timestamps: true });
 
+// Support fast lookup/search/filter/sort combinations used by GET /customers
+customerSchema.index({ phone: 1 });
+customerSchema.index({ email: 1 });
+customerSchema.index({ status: 1 });
+customerSchema.index({ assignedTo: 1 });
+customerSchema.index({ addedBy: 1 });
+customerSchema.index({ closed: 1 });
+customerSchema.index({ createdAt: -1 });
+
 export default mongoose.model('Customer', customerSchema);

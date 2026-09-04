@@ -17,4 +17,9 @@ const userSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true }
 }, { timestamps: true });
 
+// email already has a unique index via `unique: true` above.
+userSchema.index({ role: 1 });
+userSchema.index({ manager: 1 });
+userSchema.index({ name: 'text' });
+
 export default mongoose.model('User', userSchema);

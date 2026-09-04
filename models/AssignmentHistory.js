@@ -11,4 +11,7 @@ const assignmentHistorySchema = new mongoose.Schema({
   note: { type: String, default: '' },
 }, { timestamps: true });
 
+assignmentHistorySchema.index({ customer: 1, createdAt: 1 });
+assignmentHistorySchema.index({ toUser: 1 });
+
 export default mongoose.model('AssignmentHistory', assignmentHistorySchema);

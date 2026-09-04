@@ -12,4 +12,8 @@ const followUpSchema = new mongoose.Schema({
   nextCallDate: { type: Date }
 }, { timestamps: true });
 
+followUpSchema.index({ customer: 1, createdAt: -1 });
+followUpSchema.index({ doneBy: 1 });
+followUpSchema.index({ nextCallDate: 1 });
+
 export default mongoose.model('FollowUp', followUpSchema);
