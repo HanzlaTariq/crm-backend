@@ -38,6 +38,13 @@ export const errorHandler = (err, req, res, next) => {
     errors = Object.values(err.errors).map((e) => ({ field: e.path, message: e.message }));
   }
 
+  // Multer upload errors (file too large, too many files, wrong field name, etc.)
+  if (err.name === 'MulterError') {
+    statusCode = 400;
+    message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large (max 10MB)' : err.message;
+    errors = undefined;
+  }
+
   // JWT errors
   if (err.name === 'JsonWebTokenError') {
     statusCode = 401;

@@ -6,6 +6,7 @@ import validate from '../middleware/validate.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import AppError from '../utils/AppError.js';
 import { createFollowupSchema, customerIdParamSchema } from '../validators/followupValidators.js';
+import { logActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 
@@ -36,6 +37,14 @@ router.post('/', auth, validate({ body: createFollowupSchema }), asyncHandler(as
 
   // Customer ka status bhi update karo
   await Customer.findByIdAndUpdate(customerId, { status });
+
+  logActivity({
+    actor: req.user.id,
+    action: 'followup_created',
+    targetType: 'Customer',
+    targetId: customerId,
+    description: `${req.user.name} logged a follow-up for "${customer.name}" (${status})`,
+  });
 
   res.status(201).json(followup);
 }));

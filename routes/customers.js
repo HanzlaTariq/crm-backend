@@ -9,6 +9,10 @@ import validate from '../middleware/validate.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import AppError from '../utils/AppError.js';
 import escapeRegex from '../utils/escapeRegex.js';
+import { getTeamIds } from '../utils/teamScope.js';
+import { createNotification } from '../utils/notify.js';
+import { logActivity } from '../utils/activityLogger.js';
+import { toCsv } from '../utils/csv.js';
 import {
   createCustomerSchema,
   updateCustomerSchema,
@@ -16,7 +20,9 @@ import {
   closeCustomerSchema,
   idParamSchema,
   listCustomersQuerySchema,
+  exportCustomersQuerySchema,
 } from '../validators/customerValidators.js';
+import { bulkAssignSchema, bulkStatusSchema } from '../validators/bulkValidators.js';
 
 const router = express.Router();
 
@@ -32,27 +38,8 @@ const sanitizeClosedFields = (customer, viewerRole) => {
   return obj
 }
 
-// Helper — get all user IDs under a manager/jmanager
-const getTeamIds = async (userId, role) => {
-  if (role === 'admin') return null; // null = sab
-
-  if (role === 'manager') {
-    const jmanagers = await User.find({ manager: userId }).select('_id')
-    const jmanagerIds = jmanagers.map(j => j._id)
-    const bottom = await User.find({ manager: { $in: jmanagerIds } }).select('_id')
-    const bottomIds = bottom.map(b => b._id)
-    return [userId, ...jmanagerIds, ...bottomIds]
-  }
-
-  if (role === 'jmanager') {
-    const bottom = await User.find({ manager: userId }).select('_id')
-    const bottomIds = bottom.map(b => b._id)
-    return [userId, ...bottomIds]
-  }
-
-  // telecom / salesperson — sirf apna
-  return [userId]
-}
+// getTeamIds moved to utils/teamScope.js in Phase 2 (same logic, unchanged) so
+// the new dashboard analytics endpoint can share it instead of duplicating it.
 
 // Builds the $and-able array of extra conditions from search/filter/date-range
 // query params. Kept separate from role-visibility so the two never fight each other.
@@ -93,6 +80,55 @@ router.get('/stats/summary', auth, asyncHandler(async (req, res) => {
   ])
 
   res.json({ total, interested, followup, sale, lost, notInterested })
+}))
+
+// CSV export — same role-visibility + search/filter rules as GET /customers,
+// just without pagination. Capped at 5000 rows so a runaway export can't blow
+// up memory on a serverless function; anything bigger should filter/date-range
+// down before exporting.
+const EXPORT_ROW_CAP = 5000
+
+router.get('/export', auth, validate({ query: exportCustomersQuerySchema }), asyncHandler(async (req, res) => {
+  const { role, id } = req.user
+  const { search, status, assignedTo, dateFrom, dateTo } = req.query
+
+  const baseQuery = role === 'admin' ? { closed: { $ne: true } } : { assignedTo: id }
+  const extra = buildExtraFilters({ search, status, assignedTo, dateFrom, dateTo })
+  const finalQuery = extra.length ? { $and: [baseQuery, ...extra] } : baseQuery
+
+  const customers = await Customer.find(finalQuery)
+    .populate('addedBy', 'name')
+    .populate('assignedTo', 'name')
+    .populate('assignedBy', 'name')
+    .sort({ createdAt: -1 })
+    .limit(EXPORT_ROW_CAP)
+    .lean()
+
+  const csv = toCsv(customers, [
+    { label: 'Name', value: 'name' },
+    { label: 'Phone', value: 'phone' },
+    { label: 'Email', value: (c) => c.email || '' },
+    { label: 'Address', value: (c) => c.address || '' },
+    { label: 'Status', value: 'status' },
+    { label: 'Assigned To', value: (c) => c.assignedTo?.name || '' },
+    { label: 'Added By', value: (c) => c.addedBy?.name || '' },
+    { label: 'Notes', value: (c) => c.notes || '' },
+    { label: 'Created At', value: (c) => new Date(c.createdAt).toISOString() },
+  ])
+
+  logActivity({
+    actor: id,
+    action: 'customer_exported',
+    targetType: 'Customer',
+    description: `${req.user.name} exported ${customers.length} customer(s) to CSV`,
+    meta: { count: customers.length, filters: { search, status, assignedTo, dateFrom, dateTo } },
+  })
+
+  res.set({
+    'Content-Type': 'text/csv',
+    'Content-Disposition': `attachment; filename="customers-export-${Date.now()}.csv"`,
+  })
+  res.send(csv)
 }))
 
 // Get all customers — role based
@@ -169,6 +205,96 @@ router.get('/closed/all', auth, requireRole('admin'), validate({ query: listCust
   res.json(customers)
 }))
 
+// Bulk-assign multiple customers to one user in a single request — admin/manager
+// only (per product decision). Uses the exact same per-assignee role rules as the
+// single-customer /:id/assign route below, just looped; one AssignmentHistory
+// entry per customer (never overwritten) and one summary notification for the
+// assignee instead of spamming them with one notification per customer.
+// NOTE: registered before GET /:id — a two-segment literal path like /bulk/assign
+// would otherwise be swallowed by a /:id/... pattern with "bulk" as the :id.
+router.put('/bulk/assign', auth, requireRole('admin', 'manager'), validate({ body: bulkAssignSchema }), asyncHandler(async (req, res) => {
+  const { customerIds, assignedTo, note } = req.body
+  const { role, id } = req.user
+
+  const assignee = await User.findById(assignedTo)
+  if (!assignee) throw new AppError('User not found', 404)
+  if (assignee.role === 'admin') throw new AppError('Cannot assign to admin', 400)
+
+  if (role === 'manager' && !['manager', 'jmanager', 'telecom', 'salesperson'].includes(assignee.role)) {
+    throw new AppError('Not authorized to assign customers', 403)
+  }
+
+  const customers = await Customer.find({ _id: { $in: customerIds }, closed: { $ne: true } })
+  const foundIds = new Set(customers.map((c) => String(c._id)))
+  const skipped = customerIds.filter((cid) => !foundIds.has(cid))
+
+  await Promise.all(customers.map((customer) =>
+    AssignmentHistory.create({
+      customer: customer._id,
+      fromUser: customer.assignedTo || null,
+      toUser: assignedTo,
+      assignedBy: id,
+      note: note || 'Bulk assignment',
+    })
+  ))
+
+  await Customer.updateMany(
+    { _id: { $in: customers.map((c) => c._id) } },
+    { $set: { assignedTo, assignedBy: id } }
+  )
+
+  logActivity({
+    actor: id,
+    action: 'bulk_assign',
+    targetType: 'Customer',
+    description: `${req.user.name} bulk-assigned ${customers.length} customer(s) to ${assignee.name}`,
+    meta: { customerIds: customers.map((c) => String(c._id)), assignedTo, skipped },
+  });
+
+  if (customers.length && String(assignedTo) !== String(id)) {
+    createNotification({
+      user: assignedTo,
+      type: 'bulk_assignment',
+      title: 'Customers assigned to you',
+      message: `${req.user.name} assigned you ${customers.length} customer(s)`,
+    });
+  }
+
+  res.json({
+    message: `${customers.length} customer(s) assigned`,
+    assignedCount: customers.length,
+    skipped, // ids that were closed or no longer exist — not modified
+  })
+}))
+
+// Bulk status update — admin/manager only (per product decision). Directly sets
+// status on multiple open customers; unlike POST /followups this does not create
+// a FollowUp record (no note is collected per-customer in a bulk action), so use
+// this for quick re-categorization, not for logging a call outcome.
+router.put('/bulk/status', auth, requireRole('admin', 'manager'), validate({ body: bulkStatusSchema }), asyncHandler(async (req, res) => {
+  const { customerIds, status } = req.body
+  const { id } = req.user
+
+  const result = await Customer.updateMany(
+    { _id: { $in: customerIds }, closed: { $ne: true } },
+    { $set: { status } }
+  )
+
+  logActivity({
+    actor: id,
+    action: 'bulk_status_update',
+    targetType: 'Customer',
+    description: `${req.user.name} bulk-updated ${result.modifiedCount} customer(s) to status "${status}"`,
+    meta: { customerIds, status, matched: result.matchedCount, modified: result.modifiedCount },
+  });
+
+  res.json({
+    message: `${result.modifiedCount} customer(s) updated to "${status}"`,
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+  })
+}))
+
 // Get single customer — sirf assignedTo ya admin dekh sakte hain
 router.get('/:id', auth, validate({ params: idParamSchema }), asyncHandler(async (req, res) => {
   const customer = await Customer.findById(req.params.id)
@@ -210,6 +336,26 @@ router.post('/', auth, validate({ body: createCustomerSchema }), asyncHandler(as
     note: 'Customer added',
   });
 
+  logActivity({
+    actor: req.user.id,
+    action: 'customer_created',
+    targetType: 'Customer',
+    targetId: customer._id,
+    description: `${req.user.name} added customer "${customer.name}"`,
+  });
+
+  // Only notify if the customer was handed straight to someone else on creation
+  // — no point notifying yourself that you assigned yourself a lead.
+  if (String(finalAssignee) !== String(req.user.id)) {
+    createNotification({
+      user: finalAssignee,
+      type: 'assignment',
+      title: 'New customer assigned',
+      message: `${req.user.name} assigned you a new customer: ${customer.name}`,
+      relatedCustomer: customer._id,
+    });
+  }
+
   res.status(201).json(customer);
 }));
 
@@ -237,6 +383,16 @@ router.put('/:id', auth, validate({ params: idParamSchema, body: updateCustomerS
     .populate('addedBy', 'name role')
     .populate('assignedTo', 'name role')
     .populate('assignedBy', 'name role');
+
+  logActivity({
+    actor: id,
+    action: 'customer_updated',
+    targetType: 'Customer',
+    targetId: customer._id,
+    description: `${req.user.name} updated customer "${customer.name}"`,
+    meta: { fields: Object.keys(safeBody) },
+  });
+
   res.json(customer);
 }));
 
@@ -267,12 +423,32 @@ router.put('/:id/close', auth, validate({ params: idParamSchema, body: closeCust
     .populate('assignedBy', 'name role')
     .populate('closedBy', 'name role')
 
+  logActivity({
+    actor: id,
+    action: 'customer_closed',
+    targetType: 'Customer',
+    targetId: customer._id,
+    description: `${req.user.name} closed customer "${customer.name}"`,
+  });
+
   res.json(sanitizeClosedFields(populated, role));
 }));
 
 // Delete — admin only
 router.delete('/:id', auth, requireRole('admin'), validate({ params: idParamSchema }), asyncHandler(async (req, res) => {
+  const customer = await Customer.findById(req.params.id)
   await Customer.findByIdAndDelete(req.params.id);
+
+  if (customer) {
+    logActivity({
+      actor: req.user.id,
+      action: 'customer_deleted',
+      targetType: 'Customer',
+      targetId: req.params.id,
+      description: `${req.user.name} deleted customer "${customer.name}"`,
+    });
+  }
+
   res.json({ message: 'Customer deleted' });
 }));
 
@@ -331,6 +507,26 @@ router.put('/:id/assign', auth, validate({ params: idParamSchema, body: assignCu
   )
     .populate('assignedTo', 'name role')
     .populate('assignedBy', 'name role')
+
+  const isReassignment = Boolean(existingCustomer.assignedTo)
+
+  logActivity({
+    actor: id,
+    action: isReassignment ? 'customer_reassigned' : 'customer_assigned',
+    targetType: 'Customer',
+    targetId: customer._id,
+    description: `${req.user.name} ${isReassignment ? 'reassigned' : 'assigned'} "${customer.name}" to ${assignee.name}`,
+  });
+
+  if (String(assignedTo) !== String(id)) {
+    createNotification({
+      user: assignedTo,
+      type: isReassignment ? 'reassignment' : 'assignment',
+      title: isReassignment ? 'Customer reassigned to you' : 'New customer assigned',
+      message: `${req.user.name} ${isReassignment ? 'reassigned' : 'assigned'} you a customer: ${customer.name}`,
+      relatedCustomer: customer._id,
+    });
+  }
 
   res.json(customer)
 }))

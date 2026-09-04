@@ -8,6 +8,11 @@ import authRoutes from './routes/auth.js';
 import customerRoutes from './routes/customers.js';
 import followupRoutes from './routes/followups.js';
 import userRoutes from './routes/users.js';
+import notificationRoutes from './routes/notifications.js';
+import activityRoutes from './routes/activity.js';
+import dashboardRoutes from './routes/dashboard.js';
+import attachmentRoutes from './routes/attachments.js';
+import cronRoutes from './routes/cron.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 import { generalLimiter } from './middleware/rateLimiters.js';
 import logger from './utils/logger.js';
@@ -61,6 +66,13 @@ app.use('/api/auth', authRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/followups', followupRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/activity', activityRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/attachments', attachmentRoutes);
+// Not part of the public API surface — invoked only by Vercel Cron (or manually
+// with the CRON_SECRET), see routes/cron.js for the auth check.
+app.use('/api/cron', cronRoutes);
 
 // Test route
 app.get('/', (req, res) => {

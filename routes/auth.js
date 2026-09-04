@@ -9,6 +9,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import AppError from '../utils/AppError.js';
 import { registerSchema, loginSchema, updateUserSchema, idParamSchema } from '../validators/authValidators.js';
 import { loginLimiter, registerLimiter } from '../middleware/rateLimiters.js';
+import { logActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 
@@ -41,6 +42,14 @@ router.post(
     const userObj = user.toObject();
     delete userObj.password;
 
+    logActivity({
+      actor: req.user.id,
+      action: 'user_created',
+      targetType: 'User',
+      targetId: user._id,
+      description: `${req.user.name} created user "${user.name}" (${user.role})`,
+    });
+
     res.status(201).json({ message: 'User created ✅', user: userObj });
   })
 );
@@ -67,6 +76,14 @@ router.post(
       { expiresIn: '7d' }
     );
 
+    logActivity({
+      actor: user._id,
+      action: 'login',
+      targetType: 'User',
+      targetId: user._id,
+      description: `${user.name} logged in`,
+    });
+
     res.json({ token, user: { id: user._id, name: user.name, role: user.role } });
   })
 );
@@ -91,6 +108,16 @@ router.put(
       .populate('manager', 'name role');
 
     if (!user) throw new AppError('User not found', 404);
+
+    logActivity({
+      actor: req.user.id,
+      action: 'user_updated',
+      targetType: 'User',
+      targetId: user._id,
+      description: `${req.user.name} updated user "${user.name}"`,
+      meta: { fields: Object.keys(update) },
+    });
+
     res.json(user);
   })
 );

@@ -43,3 +43,13 @@ export const listCustomersQuerySchema = z.object({
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
 });
+
+// Same filters as the list endpoint, without pagination — export always returns
+// every matching row (capped, see routes/customers.js) rather than one page.
+export const exportCustomersQuerySchema = z.object({
+  search: z.string().trim().max(150).optional(),
+  status: z.enum(STATUSES).optional(),
+  assignedTo: objectId.optional(),
+  dateFrom: z.coerce.date().optional(),
+  dateTo: z.coerce.date().optional(),
+});
