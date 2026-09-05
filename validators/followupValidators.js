@@ -13,3 +13,10 @@ export const createFollowupSchema = z.object({
 export const customerIdParamSchema = z.object({
   customerId: objectId,
 });
+
+// Phase 4 — calendar view. Both optional; the route defaults to a sensible
+// window (current month) when neither is given.
+export const calendarQuerySchema = z.object({
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+});
