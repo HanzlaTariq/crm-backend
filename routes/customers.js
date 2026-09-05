@@ -9,7 +9,9 @@ import validate from '../middleware/validate.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import AppError from '../utils/AppError.js';
 import escapeRegex from '../utils/escapeRegex.js';
-import { getTeamIds } from '../utils/teamScope.js';
+// getTeamIds is used elsewhere (routes/followups.js calendar view) — this
+// file no longer needs it now that /stats/summary matches the Customers
+// list's "own assigned only" visibility instead of the team rollup.
 import { createNotification } from '../utils/notify.js';
 import { logActivity } from '../utils/activityLogger.js';
 import { toCsv } from '../utils/csv.js';
@@ -38,9 +40,6 @@ const sanitizeClosedFields = (customer, viewerRole) => {
   return obj
 }
 
-// getTeamIds moved to utils/teamScope.js in Phase 2 (same logic, unchanged) so
-// the new dashboard analytics endpoint can share it instead of duplicating it.
-
 // Builds the $and-able array of extra conditions from search/filter/date-range
 // query params. Kept separate from role-visibility so the two never fight each other.
 const buildExtraFilters = ({ search, status, assignedTo, dateFrom, dateTo }) => {
@@ -64,11 +63,11 @@ const buildExtraFilters = ({ search, status, assignedTo, dateFrom, dateTo }) => 
 
 router.get('/stats/summary', auth, asyncHandler(async (req, res) => {
   const { role, id } = req.user
-  const teamIds = await getTeamIds(id, role)
-
-  const matchQuery = teamIds
-    ? { $or: [{ addedBy: { $in: teamIds } }, { assignedTo: { $in: teamIds } }] }
-    : {}
+  // Same visibility rule as GET / (the Customers list) — once a customer is
+  // assigned, only that person sees it, not their manager/team hierarchy.
+  // Stats must match what the Customers page actually shows, or the two
+  // screens report different numbers for the same person.
+  const matchQuery = role === 'admin' ? {} : { assignedTo: id }
 
   const [total, interested, followup, sale, lost, notInterested] = await Promise.all([
     Customer.countDocuments(matchQuery),

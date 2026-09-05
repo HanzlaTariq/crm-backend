@@ -4,7 +4,6 @@ import User from '../models/User.js';
 import auth from '../middleware/auth.js';
 import validate from '../middleware/validate.js';
 import asyncHandler from '../utils/asyncHandler.js';
-import { getTeamIds } from '../utils/teamScope.js';
 import { analyticsQuerySchema } from '../validators/dashboardValidators.js';
 
 const router = express.Router();
@@ -33,9 +32,11 @@ const buildEmptySeries = (start, granularity) => {
 };
 
 // Analytics for charts: leads-over-time, status breakdown, conversion rate,
-// per-user performance — all scoped by the same role-hierarchy rules as
-// GET /customers/stats/summary (via the shared getTeamIds helper), so an
-// admin sees company-wide numbers and everyone else sees only their own scope.
+// per-user performance — scoped the same way GET /customers (the Customers
+// list page) is: admin sees everything, everyone else sees only customers
+// assigned directly to them. This intentionally matches the list page rather
+// than rolling up a manager's whole downline team, so the numbers here never
+// disagree with what the Customers page actually shows that person.
 router.get('/analytics', auth, validate({ query: analyticsQuerySchema }), asyncHandler(async (req, res) => {
   const { role, id } = req.user;
   const { period } = req.query;
@@ -45,8 +46,7 @@ router.get('/analytics', auth, validate({ query: analyticsQuerySchema }), asyncH
   start.setDate(start.getDate() - days);
   start.setHours(0, 0, 0, 0);
 
-  const teamIds = await getTeamIds(id, role);
-  const scopeQuery = teamIds ? { $or: [{ addedBy: { $in: teamIds } }, { assignedTo: { $in: teamIds } }] } : {};
+  const scopeQuery = role === 'admin' ? {} : { assignedTo: id };
   const dateFormat = granularity === 'month' ? '%Y-%m' : '%Y-%m-%d';
 
   const [leadsOverTimeRaw, statusBreakdownRaw, perUserRaw, totalAllTime, totalInRange] = await Promise.all([
